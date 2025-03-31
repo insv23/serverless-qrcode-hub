@@ -44,6 +44,14 @@ async function initDatabase() {
     `).run();
   }
 
+  // 添加 clicks 列（如果不存在）
+  if (!columns.includes('clicks')) {
+    await DB.prepare(`
+      ALTER TABLE mappings 
+      ADD COLUMN clicks INTEGER DEFAULT 0
+    `).run();
+  }
+
   // 添加索引
   await DB.prepare(`
     CREATE INDEX IF NOT EXISTS idx_expiry ON mappings(expiry)
@@ -119,7 +127,8 @@ async function listMappings(page = 1, pageSize = 10) {
       expiry: row.expiry,
       enabled: row.enabled === 1,
       isWechat: row.isWechat === 1,
-      qrCodeData: row.qrCodeData
+      qrCodeData: row.qrCodeData,
+      clicks: row.clicks || 0
     };
   }
 
@@ -152,8 +161,8 @@ async function createMapping(path, target, name, expiry, enabled = true, isWecha
   }
 
   await DB.prepare(`
-    INSERT INTO mappings (path, target, name, expiry, enabled, isWechat, qrCodeData)
-    VALUES (?, ?, ?, ?, ?, ?, ?)
+    INSERT INTO mappings (path, target, name, expiry, enabled, isWechat, qrCodeData, clicks)
+    VALUES (?, ?, ?, ?, ?, ?, ?, 0)
   `).bind(
     path,
     target,
@@ -228,6 +237,15 @@ async function updateMapping(originalPath, newPath, target, name, expiry, enable
   ).run();
 }
 
+// 添加函数用于增加点击次数
+async function incrementClickCount(path) {
+  await DB.prepare(`
+    UPDATE mappings 
+    SET clicks = clicks + 1
+    WHERE path = ?
+  `).bind(path).run();
+}
+
 async function getExpiringMappings() {
   // 获取今天的日期（设置为今天的23:59:59）
   const today = new Date();
@@ -249,7 +267,7 @@ async function getExpiringMappings() {
   const results = await DB.prepare(`
     WITH categorized_mappings AS (
       SELECT 
-        path, name, target, expiry, enabled, isWechat, qrCodeData,
+        path, name, target, expiry, enabled, isWechat, qrCodeData, clicks,
         CASE 
           WHEN datetime(expiry) < datetime(?) THEN 'expired'
           WHEN datetime(expiry) <= datetime(?) THEN 'expiring'
@@ -276,7 +294,8 @@ async function getExpiringMappings() {
       expiry: row.expiry,
       enabled: row.enabled === 1,
       isWechat: row.isWechat === 1,
-      qrCodeData: row.qrCodeData
+      qrCodeData: row.qrCodeData,
+      clicks: row.clicks || 0
     };
 
     if (row.status === 'expired') {
@@ -429,7 +448,7 @@ export default {
             }
 
             const mapping = await DB.prepare(`
-              SELECT path, target, name, expiry, enabled, isWechat, qrCodeData
+              SELECT path, target, name, expiry, enabled, isWechat, qrCodeData, clicks
               FROM mappings
               WHERE path = ?
             `).bind(mappingPath).first();
@@ -498,7 +517,7 @@ export default {
     if (path) {
       try {
         const mapping = await DB.prepare(`
-          SELECT path, target, name, expiry, enabled, isWechat, qrCodeData
+          SELECT path, target, name, expiry, enabled, isWechat, qrCodeData, clicks
           FROM mappings
           WHERE path = ?
         `).bind(path).first();
@@ -507,6 +526,9 @@ export default {
           if (!mapping.enabled) {
             return new Response('Not Found', { status: 404 });
           }
+
+          // 增加点击次数
+          await incrementClickCount(path);
 
           // 检查是否过期 - 使用当天23:59:59作为失效判断时间
           if (mapping.expiry) {
